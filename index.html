@@ -4,6 +4,38 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mundial 2026 – Predicciones</title>
+
+<!-- ── BLOQUEO DE DOMINIO ────────────────────────────────────────────────────
+     Si este archivo se abre desde cualquier lugar que NO sea la web oficial,
+     redirige automáticamente a la URL correcta. Esto evita que la gente siga
+     usando copias viejas del HTML guardadas en su celular/PC. -->
+<script>
+(function(){
+  var OFFICIAL_HOST = 'marcosfabregat81-bit.github.io'; // ← tu dominio de GitHub Pages
+  var OFFICIAL_URL   = 'https://marcosfabregat81-bit.github.io/mundial2026/';
+  var currentHost = window.location.hostname;
+  var currentProtocol = window.location.protocol;
+
+  // Bloquea si: se abre como archivo local (file://) o desde cualquier host distinto al oficial
+  var isLocalFile = currentProtocol === 'file:';
+  var isWrongHost = currentHost !== OFFICIAL_HOST;
+
+  if (isLocalFile || isWrongHost) {
+    window.location.replace(OFFICIAL_URL);
+    document.write(
+      '<div style="font-family:sans-serif;background:#080c10;color:#e8edf2;' +
+      'min-height:100vh;display:flex;flex-direction:column;align-items:center;' +
+      'justify-content:center;text-align:center;padding:20px;">' +
+      '<h2>⚽ Redirigiendo...</h2>' +
+      '<p>Esta versión del archivo ya no está activa.</p>' +
+      '<p>Te llevamos a la web oficial: <a href="' + OFFICIAL_URL + '" style="color:#00c853">' + OFFICIAL_URL + '</a></p>' +
+      '</div>'
+    );
+    throw new Error('Redirecting to official domain');
+  }
+})();
+</script>
+
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
 
 <script type="module">
@@ -22,6 +54,7 @@ const firebaseConfig = {
 
 const fbApp = initializeApp(firebaseConfig);
 const db    = getFirestore(fbApp);
+
 
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const ADMINS = ['marcos_f', 'gonzalo_p']; // usuarios que cargan resultados reales
@@ -438,7 +471,10 @@ function calcUserScore(preds){
 
 // ── FIRESTORE SAVES ───────────────────────────────────────────────────────────
 async function savePrediction(matchId,ph,pa,confirmed=false){
-  try{ await setDoc(doc(db,'predictions',currentUser,'matches',matchId),{ph,pa,confirmed},{merge:true}); }
+  try{
+    await setDoc(doc(db,'predictions',currentUser,'matches',matchId),
+      {ph,pa,confirmed,lastSavedAt:Date.now()},{merge:true});
+  }
   catch(e){ console.error('Error saving prediction',e); }
 }
 async function saveRealResult(matchId,rh,ra){
@@ -482,6 +518,7 @@ function matchCard(m, knockoutLabel){
   const ph=p.ph??'', pa=p.pa??'';
   const rh=r.rh??'', ra=r.ra??'';
   const confirmed=p.confirmed||false;
+  const started=matchHasStarted(m.id);
 
   let badge='';
   if(ph!==''&&pa!==''&&rh!==''&&ra!==''){
@@ -495,8 +532,11 @@ function matchCard(m, knockoutLabel){
   }
 
   // Prediction row: locked if confirmed
+  const lockedByTime = started && !isAdmin;
   const predInputs = confirmed
     ? `<div class="score-confirmed">${ph} – ${pa}</div>`
+    : lockedByTime
+    ? `<div class="score-confirmed" style="color:var(--loss)">${ph!==''&&pa!==''?ph+' – '+pa:'Sin cargar'}</div>`
     : `<div class="score-inputs">
         <input type="number" min="0" max="99" placeholder="–"
           value="${ph}" class="${ph!==''?'filled':''}"
@@ -508,8 +548,6 @@ function matchCard(m, knockoutLabel){
           onchange="window.onScore('${m.id}','pa',this.value)"
           oninput="window.onScore('${m.id}','pa',this.value)">
       </div>`;
-
-  const started = matchHasStarted(m.id);
   // Confirm button: only if not confirmed, both scores entered, no real result, AND match hasn't started
   const confirmRow = (!isAdmin && !confirmed && ph!=='' && pa!=='' && rh==='' && !started)
     ? `<div class="confirm-row">
@@ -706,6 +744,82 @@ async function renderRanking(){
   }
 }
 
+// ── AUDITORÍA (solo admins) ──────────────────────────────────────────────────
+async function renderAuditoria(){
+  const el=document.getElementById('auditoria-content');
+  if(!el || !isAdmin) return;
+  el.innerHTML='<div class="no-data-msg">Cargando auditoría...</div>';
+  try{
+    const usersSnap=await getDocs(collection(db,'users'));
+    const lateRows=[];   // cargas después del inicio
+    const onTimeRows=[]; // cargas a tiempo (resumen)
+
+    for(const userDoc of usersSnap.docs){
+      const userName=userDoc.id;
+      const matchesSnap=await getDocs(collection(db,'predictions',userName,'matches'));
+      matchesSnap.forEach(d=>{
+        const data=d.data();
+        const matchId=d.id;
+        if(data.lastSavedAt===undefined) return; // predicciones viejas sin timestamp
+        const kt=KICKOFF_TIMES[matchId];
+        if(!kt) return;
+        const kickoffUTC=new Date(kt+':00-03:00').getTime();
+        const savedAt=data.lastSavedAt;
+        const m=allMatches().find(mm=>mm.id===matchId);
+        if(!m) return;
+        const row={
+          user:userName, matchId, home:m.home, away:m.away,
+          ph:data.ph, pa:data.pa, confirmed:data.confirmed||false,
+          savedAt, kickoffUTC,
+          diffMin: Math.round((savedAt-kickoffUTC)/60000)
+        };
+        if(savedAt > kickoffUTC) lateRows.push(row);
+        else onTimeRows.push(row);
+      });
+    }
+
+    lateRows.sort((a,b)=>b.savedAt-a.savedAt);
+
+    const fmtDate=(ts)=>{
+      const d=new Date(ts);
+      // Convert to Argentina time for display
+      const argStr=d.toLocaleString('es-AR',{timeZone:'America/Argentina/Buenos_Aires',
+        day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+      return argStr;
+    };
+
+    let html='';
+
+    if(lateRows.length===0){
+      html+=`<div class="tip-box-ok">✅ No se detectaron cargas posteriores al inicio de ningún partido.</div>`;
+    } else {
+      html+=`<div class="group-title" style="font-size:18px;color:var(--loss)">⚠️ Cargas después del inicio (${lateRows.length})</div>`;
+      html+=`<div class="tabla-wrap"><table class="tabla-table"><thead><tr>
+        <th class="left">Usuario</th><th class="left">Partido</th><th>Predicción</th><th>Cargó</th><th>Inicio</th><th>Demora</th>
+      </tr></thead><tbody>`;
+      lateRows.forEach(r=>{
+        html+=`<tr style="background:rgba(255,61,87,0.06)">
+          <td class="left" style="font-weight:700">${r.user}</td>
+          <td class="left" style="font-size:11px">${r.home} vs ${r.away}</td>
+          <td>${r.ph}–${r.pa}${r.confirmed?' 🔒':''}</td>
+          <td style="font-size:11px;color:var(--loss)">${fmtDate(r.savedAt)}</td>
+          <td style="font-size:11px;color:var(--muted)">${fmtDate(r.kickoffUTC)}</td>
+          <td style="font-size:11px;color:var(--loss);font-weight:700">+${r.diffMin}min</td>
+        </tr>`;
+      });
+      html+=`</tbody></table></div>`;
+    }
+
+    html+=`<div class="group-title" style="font-size:16px;margin-top:24px">Resumen general</div>`;
+    html+=`<p style="color:var(--muted);font-size:12px">Total predicciones registradas con horario: ${lateRows.length+onTimeRows.length} · A tiempo: ${onTimeRows.length} · Tarde: ${lateRows.length}</p>`;
+
+    el.innerHTML=html;
+  } catch(e){
+    el.innerHTML='<div class="no-data-msg">Error cargando auditoría.</div>';
+    console.error(e);
+  }
+}
+
 // ── PHASE SHARE BARS ─────────────────────────────────────────────────────────
 function renderPhaseShareBars(){
   phases.forEach(phase=>{
@@ -748,7 +862,8 @@ function updateMyStats(){
 
 // ── EVENTS ────────────────────────────────────────────────────────────────────
 window.onScore=async(id,field,val)=>{
-  if(myPredictions[id]&&myPredictions[id].confirmed) return; // locked
+  if(myPredictions[id]&&myPredictions[id].confirmed) return; // locked by confirmation
+  if(matchHasStarted(id) && !isAdmin) return; // locked because match already started
   if(!myPredictions[id]) myPredictions[id]={};
   myPredictions[id][field]=val;
   const ph=myPredictions[id].ph??'', pa=myPredictions[id].pa??'';
@@ -821,6 +936,7 @@ window.showTab=(id,btn)=>{
   document.getElementById(id).classList.add('active');
   btn.classList.add('active');
   if(id==='ranking') renderRanking();
+  if(id==='auditoria') renderAuditoria();
 };
 
 // ── LOGIN ─────────────────────────────────────────────────────────────────────
@@ -843,12 +959,20 @@ window.doLogin=async()=>{
 
   currentUser = userKey;
   isAdmin = ADMINS.includes(currentUser);
-  // Register user in 'users' collection so ranking can find them
-  try{ await setDoc(doc(db,'users',currentUser),{name:raw,joinedAt:Date.now()},{merge:true}); }
-  catch(e){ console.error('Error registering user',e); }
+  // Register user — will fail if not in allowed_users list (Firestore rules)
+  try{
+    await setDoc(doc(db,'users',currentUser),{name:raw,joinedAt:Date.now()},{merge:true});
+  } catch(e){
+    // Firestore rejected → user not in allowed list
+    errEl.style.display='block';
+    errEl.textContent='Usuario no autorizado. Contactá al administrador.';
+    currentUser=null; isAdmin=false;
+    return;
+  }
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='block';
   document.getElementById('user-label').textContent=raw+(isAdmin?' ⚙️':'');
+  if(isAdmin) document.getElementById('tab-auditoria').style.display='inline-block';
   listenResults();
   listenMyPredictions();
 };
@@ -958,6 +1082,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   .pts-cell{font-family:'Bebas Neue',sans-serif;font-size:19px;color:var(--accent2);}
   .qualify-bar{height:2px;background:var(--accent);opacity:0.35;}
   .no-data-msg{text-align:center;color:var(--muted);font-size:13px;padding:18px;letter-spacing:1px;}
+  .tip-box-ok{background:rgba(0,200,83,0.08);border:1px solid rgba(0,200,83,0.3);border-radius:12px;padding:14px;color:var(--accent);font-size:13px;text-align:center;letter-spacing:0.5px;margin-bottom:16px;}
 
   /* Confirmed prediction */
   .match-card.confirmed{ border-color:rgba(0,200,83,0.3); }
@@ -1056,6 +1181,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     <button class="tab-btn" onclick="showTab('cuartos',this)">Cuartos</button>
     <button class="tab-btn" onclick="showTab('semis',this)">Semis</button>
     <button class="tab-btn" onclick="showTab('final',this)">Final</button>
+    <button class="tab-btn" id="tab-auditoria" onclick="showTab('auditoria',this)" style="display:none">🔍 Auditoría</button>
   </div>
 
   <div id="fase-grupos" class="tab-content active">
@@ -1090,6 +1216,16 @@ document.addEventListener('DOMContentLoaded',()=>{
   <div id="final" class="tab-content">
     <div class="content"><div class="group-title">Gran Final</div><div id="final-content"></div></div>
     <div class="content" style="padding-top:0"><div class="phase-share-bar" id="share-final"></div></div>
+  </div>
+  <div id="auditoria" class="tab-content">
+    <div class="content">
+      <div class="group-title">🔍 Auditoría de Cargas</div>
+      <p style="color:var(--muted);font-size:12px;margin-bottom:14px;letter-spacing:0.5px;">
+        Mostrá cuándo cargó cada usuario su predicción comparado contra el horario de inicio del partido.
+        En <span style="color:var(--loss);font-weight:700">rojo</span> los casos donde se guardó después del inicio.
+      </p>
+      <div id="auditoria-content"><div class="no-data-msg">Abrí esta sección para cargar la auditoría</div></div>
+    </div>
   </div>
 
   <footer>Mundial 2026 · 11 Jun – 19 Jul · ☁️ Firebase Sync</footer>
