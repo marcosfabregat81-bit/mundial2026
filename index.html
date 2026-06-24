@@ -454,32 +454,44 @@ function resolveTeam(label){
 }
 
 function calcUserScore(preds){
-  let exact=0,partial=0,wrong=0,total=0;
+  let exact=0,partial=0,wrong=0,penOk=0,total=0;
   allMatches().forEach(m=>{
     const r=realResults[m.id]; const p=preds[m.id];
     if(!r||r.rh===undefined||r.ra===undefined||r.rh===''||r.ra==='') return;
     if(!p||p.ph===undefined||p.pa===undefined||p.ph===''||p.pa==='') return;
     total++;
-    if(String(p.ph)===String(r.rh)&&String(p.pa)===String(r.ra)) exact++;
-    else if(getWinner(+p.ph,+p.pa)===getWinner(+r.rh,+r.ra)) partial++;
-    else wrong++;
+    const predDraw = String(p.ph)===String(p.pa);
+    const realDraw = String(r.rh)===String(r.ra);
+    if(String(p.ph)===String(r.rh)&&String(p.pa)===String(r.ra)){
+      exact++;
+      // bonus: predicted draw + penalty winner correct
+      if(predDraw && realDraw && p.penWinner && r.penWinner && p.penWinner===r.penWinner) penOk++;
+    } else if(getWinner(+p.ph,+p.pa)===getWinner(+r.rh,+r.ra)){
+      partial++;
+      // bonus: predicted draw + penalty winner correct
+      if(predDraw && realDraw && p.penWinner && r.penWinner && p.penWinner===r.penWinner) penOk++;
+    } else { wrong++; }
   });
-  const pts=exact*3+partial*1;
+  const pts=exact*3+partial*1+penOk*1;
   const pct=total>0?Math.round(((exact+partial*0.5)/total)*100):0;
-  return {exact,partial,wrong,total,pts,pct};
+  return {exact,partial,wrong,penOk,total,pts,pct};
 }
 
 // ── FIRESTORE SAVES ───────────────────────────────────────────────────────────
-async function savePrediction(matchId,ph,pa,confirmed=false){
+async function savePrediction(matchId,ph,pa,confirmed=false,penWinner=''){
   try{
     await setDoc(doc(db,'predictions',currentUser,'matches',matchId),
-      {ph,pa,confirmed,lastSavedAt:Date.now()},{merge:true});
+      {ph,pa,confirmed,penWinner,lastSavedAt:Date.now()},{merge:true});
   }
   catch(e){ console.error('Error saving prediction',e); }
 }
 async function saveRealResult(matchId,rh,ra){
   try{ await setDoc(doc(db,'results','shared','matches',matchId),{rh,ra},{merge:true}); }
   catch(e){ console.error('Error saving result',e); }
+}
+async function saveRealPenWinner(matchId,penWinner){
+  try{ await setDoc(doc(db,'results','shared','matches',matchId),{penWinner},{merge:true}); }
+  catch(e){ console.error('Error saving pen winner',e); }
 }
 
 // ── FIRESTORE LISTENERS ───────────────────────────────────────────────────────
@@ -519,14 +531,27 @@ function matchCard(m, knockoutLabel){
   const rh=r.rh??'', ra=r.ra??'';
   const confirmed=p.confirmed||false;
   const started=matchHasStarted(m.id);
+  const isKnockout=!!knockoutLabel;
+
+  // Penalty data
+  const penWinnerPred = p.penWinner||'';   // 'home' or 'away'
+  const penWinnerReal = r.penWinner||'';
+  const predIsDraw = ph!==''&&pa!==''&&String(ph)===String(pa);
+  const realIsDraw = rh!==''&&ra!==''&&String(rh)===String(ra);
 
   let badge='';
   if(ph!==''&&pa!==''&&rh!==''&&ra!==''){
     const pw=getWinner(+ph,+pa), rw=getWinner(+rh,+ra);
+    let extraPen='';
+    // Check penalty bonus
+    if(predIsDraw&&realIsDraw&&penWinnerPred&&penWinnerReal){
+      if(penWinnerPred===penWinnerReal) extraPen=' <span style="color:var(--accent2)">+1pt penales ✓</span>';
+      else extraPen=' <span style="color:var(--loss)">penales ✗</span>';
+    }
     if(String(ph)===String(rh)&&String(pa)===String(ra))
-      badge='<span class="result-badge correct">✓ Exacto +3pts</span>';
+      badge=`<span class="result-badge correct">✓ Exacto +3pts${extraPen}</span>`;
     else if(pw===rw)
-      badge='<span class="result-badge partial">~ Ganador OK +1pt</span>';
+      badge=`<span class="result-badge partial">~ Ganador OK +1pt${extraPen}</span>`;
     else
       badge='<span class="result-badge wrong">✗ Fallado</span>';
   }
@@ -548,6 +573,53 @@ function matchCard(m, knockoutLabel){
           onchange="window.onScore('${m.id}','pa',this.value)"
           oninput="window.onScore('${m.id}','pa',this.value)">
       </div>`;
+  // ── PENALTY SELECTOR (knockout only, when prediction is draw) ──────────────
+  // Resolve home/away display names for penalty buttons (same as resolveTeam logic below)
+  let penHomeName=m.home, penAwayName=m.away;
+  if(isKnockout){
+    const rh2=resolveTeam(m.home), ra2=resolveTeam(m.away);
+    if(rh2) penHomeName=rh2.name;
+    if(ra2) penAwayName=ra2.name;
+  }
+
+  // User penalty selector: only in knockout, draw predicted, not started, not confirmed
+  let penSection='';
+  if(isKnockout && !isAdmin){
+    if(predIsDraw && !started && !confirmed){
+      const selH = penWinnerPred==='home' ? 'class="pen-btn pen-selected"' : 'class="pen-btn"';
+      const selA = penWinnerPred==='away' ? 'class="pen-btn pen-selected"' : 'class="pen-btn"';
+      penSection=`
+        <div class="pen-row">
+          <span class="pen-label">🥅 ¿Quién gana los penales?</span>
+          <div class="pen-btns">
+            <button ${selH} onclick="window.onPenWinner('${m.id}','home')">${penHomeName}</button>
+            <button ${selA} onclick="window.onPenWinner('${m.id}','away')">${penAwayName}</button>
+          </div>
+        </div>`;
+    } else if(predIsDraw && (started || confirmed) && penWinnerPred){
+      const winnerName = penWinnerPred==='home' ? penHomeName : penAwayName;
+      penSection=`<div class="pen-row"><span class="pen-label">🥅 Penales: <strong>${winnerName}</strong></span></div>`;
+    } else if(predIsDraw && (started || confirmed) && !penWinnerPred){
+      penSection=`<div class="pen-row"><span class="pen-label" style="color:var(--muted)">🥅 Sin ganador de penales cargado</span></div>`;
+    }
+  }
+
+  // Admin penalty result section
+  let adminPenSection='';
+  if(isAdmin && isKnockout && (realIsDraw || (rh===''&&ra===''))){
+    const selH = penWinnerReal==='home' ? 'class="pen-btn pen-selected"' : 'class="pen-btn"';
+    const selA = penWinnerReal==='away' ? 'class="pen-btn pen-selected"' : 'class="pen-btn"';
+    adminPenSection=`
+      <div class="pen-row">
+        <span class="pen-label">⚙️ Ganador penales (real)</span>
+        <div class="pen-btns">
+          <button ${selH} onclick="window.onRealPenWinner('${m.id}','home')">${penHomeName}</button>
+          <button ${selA} onclick="window.onRealPenWinner('${m.id}','away')">${penAwayName}</button>
+          ${penWinnerReal ? `<button class="pen-btn pen-clear" onclick="window.onRealPenWinner('${m.id}','')">✕</button>` : ''}
+        </div>
+      </div>`;
+  }
+
   // Confirm button: only if not confirmed, both scores entered, no real result, AND match hasn't started
   const confirmRow = (!isAdmin && !confirmed && ph!=='' && pa!=='' && rh==='' && !started)
     ? `<div class="confirm-row">
@@ -557,7 +629,7 @@ function matchCard(m, knockoutLabel){
     ? `<div class="confirm-row"><span class="started-tag">⏱️ Partido iniciado — predicción bloqueada</span></div>`
     : '';
 
-  // Show confirmed tag (no per-match WA button — sharing is done per phase at bottom)
+  // Show confirmed tag
   const waRow = (!isAdmin && confirmed)
     ? `<div class="confirm-row"><span class="confirmed-tag">🔒 Confirmada</span></div>`
     : '';
@@ -607,7 +679,9 @@ function matchCard(m, knockoutLabel){
       ${predInputs}
       <div class="team right">${awayFlagDisplay} ${awayDisplay}</div>
     </div>
+    ${penSection}
     ${confirmRow}${waRow}
+    ${adminPenSection}
     ${realSection}
     ${badge}
   </div>`;
@@ -722,7 +796,7 @@ async function renderRanking(){
     }
     const medals=['🥇','🥈','🥉'];
     let html=`<div class="tabla-wrap"><table class="tabla-table"><thead><tr>
-      <th>#</th><th class="left">Jugador</th><th>✓✓</th><th>~</th><th>✗</th><th>Pts</th><th>%</th>
+      <th>#</th><th class="left">Jugador</th><th>✓✓</th><th>~</th><th>🥅</th><th>✗</th><th>Pts</th><th>%</th>
     </tr></thead><tbody>`;
     rows.forEach((r,i)=>{
       const isMe=r.name===currentUser;
@@ -731,6 +805,7 @@ async function renderRanking(){
         <td class="left" style="font-weight:${isMe?'700':'500'}">${r.name}${isMe?' 👈':''}</td>
         <td style="color:var(--accent)">${r.exact}</td>
         <td style="color:var(--draw)">${r.partial}</td>
+        <td style="color:var(--accent2)">${r.penOk||0}</td>
         <td style="color:var(--loss)">${r.wrong}</td>
         <td class="pts-cell">${r.pts}</td>
         <td style="color:var(--muted);font-size:12px">${r.pct}%</td>
@@ -867,17 +942,41 @@ window.onScore=async(id,field,val)=>{
   if(!myPredictions[id]) myPredictions[id]={};
   myPredictions[id][field]=val;
   const ph=myPredictions[id].ph??'', pa=myPredictions[id].pa??'';
-  if(ph!==''&&pa!=='') await savePrediction(id,ph,pa,false);
+  // If no longer a draw, clear penalty winner
+  if(ph!==''&&pa!==''&&ph!==pa) myPredictions[id].penWinner='';
+  const penW=myPredictions[id].penWinner||'';
+  if(ph!==''&&pa!=='') await savePrediction(id,ph,pa,false,penW);
   updateMyStats();
   refreshBadge(id);
+};
+
+window.onPenWinner=async(id,side)=>{
+  if(matchHasStarted(id) && !isAdmin) return; // locked
+  if(myPredictions[id]&&myPredictions[id].confirmed) return; // locked by confirmation
+  if(!myPredictions[id]) myPredictions[id]={};
+  // Toggle: clicking same side deselects it
+  const current=myPredictions[id].penWinner||'';
+  const newVal = current===side ? '' : side;
+  myPredictions[id].penWinner=newVal;
+  const ph=myPredictions[id].ph??'', pa=myPredictions[id].pa??'';
+  if(ph!==''&&pa!=='') await savePrediction(id,ph,pa,false,newVal);
+  renderAll();
+};
+
+window.onRealPenWinner=async(id,side)=>{
+  if(!isAdmin) return;
+  realResults[id]=realResults[id]||{};
+  realResults[id].penWinner=side;
+  await saveRealPenWinner(id,side);
+  renderAll();
 };
 
 window.confirmPrediction=async(id,home,away,ph,pa)=>{
   if(!confirm(`¿Confirmás tu predicción?\n${home} ${ph} – ${pa} ${away}\n\nNo podrás cambiarla después.`)) return;
   if(!myPredictions[id]) myPredictions[id]={};
   myPredictions[id].confirmed=true;
-  await savePrediction(id,ph,pa,true);
-  // Re-render the card
+  const penW=myPredictions[id].penWinner||'';
+  await savePrediction(id,ph,pa,true,penW);
   renderAll();
 };
 
@@ -1082,6 +1181,25 @@ document.addEventListener('DOMContentLoaded',()=>{
   .pts-cell{font-family:'Bebas Neue',sans-serif;font-size:19px;color:var(--accent2);}
   .qualify-bar{height:2px;background:var(--accent);opacity:0.35;}
   .no-data-msg{text-align:center;color:var(--muted);font-size:13px;padding:18px;letter-spacing:1px;}
+  /* Penalty section */
+  .pen-row{
+    display:flex;align-items:center;gap:8px;margin-top:8px;
+    padding-top:8px;border-top:1px solid var(--border);flex-wrap:wrap;
+  }
+  .pen-label{font-size:11px;color:var(--muted);letter-spacing:0.5px;flex-shrink:0;}
+  .pen-btns{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto;}
+  .pen-btn{
+    background:var(--surface);border:1px solid var(--border);border-radius:8px;
+    color:var(--text);font-family:'DM Sans',sans-serif;font-size:11px;font-weight:600;
+    padding:5px 12px;cursor:pointer;transition:all 0.2s;
+  }
+  .pen-btn:hover{border-color:var(--accent2);color:var(--accent2);}
+  .pen-btn.pen-selected{
+    background:rgba(255,214,0,0.15);border-color:var(--accent2);color:var(--accent2);
+  }
+  .pen-btn.pen-clear{
+    background:transparent;border-color:var(--loss);color:var(--loss);padding:5px 8px;
+  }
   .tip-box-ok{background:rgba(0,200,83,0.08);border:1px solid rgba(0,200,83,0.3);border-radius:12px;padding:14px;color:var(--accent);font-size:13px;text-align:center;letter-spacing:0.5px;margin-bottom:16px;}
 
   /* Confirmed prediction */
