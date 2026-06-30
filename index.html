@@ -775,20 +775,12 @@ async function renderRanking(){
       const matchesSnap=await getDocs(collection(db,'predictions',userName,'matches'));
       const preds={};
       matchesSnap.forEach(d=>preds[d.id]=d.data());
-      // Score against fresh results
-      let exact=0,partial=0,wrong=0,total=0;
-      allMatches().forEach(m=>{
-        const r=freshResults[m.id]; const p=preds[m.id];
-        if(!r||r.rh===undefined||r.ra===undefined||r.rh===''||r.ra==='') return;
-        if(!p||p.ph===undefined||p.pa===undefined||p.ph===''||p.pa==='') return;
-        total++;
-        if(String(p.ph)===String(r.rh)&&String(p.pa)===String(r.ra)) exact++;
-        else if(getWinner(+p.ph,+p.pa)===getWinner(+r.rh,+r.ra)) partial++;
-        else wrong++;
-      });
-      const pts=exact*3+partial*1;
-      const pct=total>0?Math.round(((exact+partial*0.5)/total)*100):0;
-      rows.push({name:userName,exact,partial,wrong,total,pts,pct});
+      // Temporarily swap realResults to use freshResults for accurate scoring
+      const savedRealResults = realResults;
+      realResults = freshResults;
+      const score = calcUserScore(preds);
+      realResults = savedRealResults;
+      rows.push({name:userName, ...score});
     }
     rows.sort((a,b)=>b.pts-a.pts||b.exact-a.exact||b.pct-a.pct);
     if(rows.length===0){
